@@ -4,7 +4,7 @@ SRCS = $(wildcard *.cpp)
 OBJS = $(SRCS:.cpp=.o)
 
 INCLUDES = 
-CPPFLAGS += -Wall -Wextra -Wno-missing-field-initializers $(INCLUDES)
+CPPFLAGS += -Wall -Wextra -Wno-missing-field-initializers -std=c++11 $(INCLUDES)
 #LDFLAGS = -L.
 #LDLIBS +=
 

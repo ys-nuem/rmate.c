@@ -28,27 +28,6 @@ extern "C" {
 
 #define MAXDATASIZE 1024
 
-enum CMD_STATE {
-    CMD_HEADER,
-    CMD_CMD,
-    CMD_VAR,
-    CMD_END
-};
-
-enum CMD_TYPE {
-    UNKNOWN,
-    CLOSE,
-    SAVE
-};
-
-struct cmd {
-    CMD_STATE state = CMD_HEADER;
-    CMD_TYPE type = UNKNOWN;
-    char* filename = NULL;
-    size_t file_len = 0;
-public:
-    cmd() = default;
-};
 
 int get_server_info(char const* host, char const* port, struct addrinfo** servinfo) {
     struct addrinfo hints;
@@ -174,88 +153,112 @@ ssize_t readline(char* buf, size_t len) {
     return line_len + 1;
 }
 
-void handle_var(const char* name, const char* value, struct cmd* cmd_state) {
-    if (!strcmp(name, "token"))
-        cmd_state->filename = strdup(value);
-    
-    if (!strcmp(name, "data"))
-        cmd_state->file_len = strtoul(value, NULL, 10);
-}
+struct cmd {
+    enum CMD_STATE {
+        CMD_HEADER,
+        CMD_CMD,
+        CMD_VAR,
+        CMD_END
+    };
 
-ssize_t handle_line(int sockfd, char* buf, size_t len, struct cmd* cmd_state) {
-    ssize_t read_len = -1;
-    size_t token_len;
-    char *name, *value;
-    
-    switch(cmd_state->state) {
-    case CMD_HEADER:
-        if((read_len = readline(buf, len)) > 0) {
-            cmd_state->state = CMD_CMD;
+    enum CMD_TYPE {
+        UNKNOWN,
+        CLOSE,
+        SAVE
+    };
+
+    CMD_STATE state = CMD_HEADER;
+    CMD_TYPE type = UNKNOWN;
+    char* filename = NULL;
+    size_t file_len = 0;
+
+public:
+    cmd() = default;
+
+    ssize_t handle_cmds(int sockfd, char* buf, size_t len) {
+        size_t total_read_len = 0;
+        
+        while (total_read_len < len) {
+            ssize_t read_len = handle_line(sockfd, buf, len);
+            if (read_len == -1)
+                return -1;
+            
+            buf += read_len;
+            total_read_len += read_len;
         }
         
-        break;
-    case CMD_CMD:
-        if((read_len = readline(buf, len)) > 0 && *buf != '\0') {
-            free(cmd_state->filename);
-            memset(cmd_state, 0, sizeof(*cmd_state));
+        return total_read_len;
+    }
+
+private:
+    void handle_var(const char* name, const char* value) {
+        if (!strcmp(name, "token"))
+            this->filename = strdup(value);
+        
+        if (!strcmp(name, "data"))
+            this->file_len = strtoul(value, NULL, 10);
+    }
+
+    ssize_t handle_line(int sockfd, char* buf, size_t len) {
+        ssize_t read_len = -1;
+        size_t token_len;
+        char *name, *value;
+        
+        switch(this->state) {
+        case CMD_HEADER:
+            if((read_len = readline(buf, len)) > 0) {
+                this->state = CMD_CMD;
+            }
             
-            if(!strncmp(buf, "close", read_len))
-                cmd_state->type = CLOSE;
+            break;
+        case CMD_CMD:
+            if ((read_len = readline(buf, len)) > 0 && *buf != '\0') {
+                free(this->filename);
+                memset(this, 0, sizeof(cmd));
+
+                if (!strncmp(buf, "close", read_len))
+                    this->type = CLOSE;
+                
+                if (!strncmp(buf, "save", read_len))
+                    this->type = SAVE;
+                
+                this->state = CMD_VAR;
+            }
             
-            if(!strncmp(buf, "save", read_len))
-                cmd_state->type = SAVE;
+            break;
+        case CMD_VAR:
+            if((read_len = readline(buf, len)) < 0) 
+                goto err;
             
-            cmd_state->state = CMD_VAR;
+            if(*buf == '\0')
+                goto err;
+            
+            if((token_len = strcspn(buf, ":")) >= (size_t) read_len)
+                goto err;
+                
+            this->state = CMD_VAR;
+            name = buf;
+            name[token_len] = '\0';
+            value = name + token_len + 1;
+            value += strspn(value, " ");
+        
+            handle_var(name, value);
+            if (!strcmp(name, "data"))
+                receive_save(sockfd, buf + read_len, len - read_len, this->filename, this->file_len);
+            break;
+            
+            err:
+            this->state = CMD_CMD;
+            break;
+        default:
+            break;
         }
         
-        break;
-    case CMD_VAR:
-        if((read_len = readline(buf, len)) < 0) 
-            goto err;
-        
-        if(*buf == '\0')
-            goto err;
-        
-        if((token_len = strcspn(buf, ":")) >= (size_t) read_len)
-            goto err;
-            
-        cmd_state->state = CMD_VAR;
-        name = buf;
-        name[token_len] = '\0';
-        value = name + token_len + 1;
-        value += strspn(value, " ");
-    
-        handle_var(name, value, cmd_state);
-        if(!strcmp(name, "data"))
-            receive_save(sockfd, buf + read_len, len - read_len, cmd_state->filename, cmd_state->file_len);
-        break;
-        
-        err:
-        cmd_state->state = CMD_CMD;
-        break;
-    default:
-        break;
+        return read_len;
     }
-    
-    return read_len;
-}
+};
 
-ssize_t handle_cmds(int sockfd, char* buf, size_t len, struct cmd *cmd_state) {
-    size_t total_read_len = 0;
-    
-    while (total_read_len < len) {
-        ssize_t read_len = handle_line(sockfd, buf, len, cmd_state);
-        if (read_len == -1)
-            return -1;
-        
-        buf += read_len;
-        total_read_len += read_len;
-    }
-    
-    return total_read_len;
-}
-
-void version(void) {
+void version() {
   char cc[256];
   time_t tc = COMMIT_DATE;
 
@@ -265,7 +268,7 @@ void version(void) {
   exit(0);
 }
 
-void usage(void) {
+void usage() {
   fprintf(stderr, "Usage: rmate [options] file\n");
   fprintf(stderr, "\nOptions:\n");
   fprintf(stderr, "  -h\t\tPrint this help\n");
@@ -359,7 +362,7 @@ int main(int argc, char *argv[])
 
             buf[numbytes] = '\0';
             
-            handle_cmds(sockfd, buf, numbytes, &cmd_state);
+            cmd_state.handle_cmds(sockfd, buf, numbytes);
         }
 
         close(sockfd);
