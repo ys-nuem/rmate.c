@@ -17,6 +17,9 @@ extern "C" {
 #include <arpa/inet.h>
 #include <time.h>
 }
+#include <iostream>
+#include <vector>
+#include <stdexcept>
 
 #include "version.h"
 
@@ -78,13 +81,16 @@ int connect_mate(const char* host, const char* port)
     struct addrinfo* servinfo;
     int ret = get_server_info(host, port, &servinfo);
     if (ret != 0) {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(ret));
-        return -1;
+        throw std::runtime_error(std::string("getaddrinfo: %s\n") + gai_strerror(ret));
     }
 
 	int sockfd = make_tcp_connection(servinfo);
+    if (sockfd < 0) {
+        throw std::runtime_error("failed to make connection");
+    }
 
 	freeaddrinfo(servinfo); // all done with this structure    
+
     return sockfd;
 }
 
@@ -153,19 +159,30 @@ int receive_save(int sockfd, char* rem_buf, size_t rem_buf_len, const char* file
     return 0;
 }
 
-int read_command(int sockfd, char* buf, size_t len) {
-    int numbytes = read(sockfd, buf, len - 1);
+std::vector<char> read_command(int sockfd) {
+    std::vector<char> buf(MAXDATASIZE);
+    int numbytes = read(sockfd, buf.data(), MAXDATASIZE - 1);
     if (numbytes == -1) {
-        perror("read");
-        return -1;
+        throw std::runtime_error("syscall: read");
     }
 
     if (numbytes == 0)
-        return 0;
+        return {};
 
-    buf[numbytes] = '\0';
-    return numbytes;
+    buf.back() = '\0';
+    return buf;
 }
+
+void send_content(int sockfd, char* filename) {
+    int fd = open(filename, O_RDONLY);
+    if (fd == -1) {
+        throw std::runtime_error("syscall: open");
+    }
+
+    send_open(sockfd, filename, fd);
+    close(fd);
+}
+
 
 class RmateState {
     enum CMD_STATE {
@@ -340,37 +357,27 @@ int main(int argc, char *argv[])
             exit(0);
     }
 
-    // create a connection to the server.
-    {
+    try {
+        // create a connection to the server.
         int sockfd = connect_mate(host, port);
-        if (sockfd == -1) {
-            fprintf(stderr, "Could not connect\n");
-            return -1;
-        }
     
         // send all contents of file to server.
-        {
-            int fd = open(filename, O_RDONLY);    
-            if (fd == -1) {
-                perror("open");
-                return -1;
-            }    
-            send_open(sockfd, filename, fd);
-            close(fd);
-        }
+        send_content(sockfd, filename);
 
         RmateState state;
         while (1) {
-            char buf[MAXDATASIZE];
-            int numbytes = read_command(sockfd, buf, MAXDATASIZE);
-            if (numbytes < 0) {
-                return numbytes;
-            }
+            auto buf = read_command(sockfd);
+            if (buf.empty())
+                break;
 
-            state.handle_cmds(sockfd, buf, numbytes);
+            state.handle_cmds(sockfd, buf.data(), buf.size());
         }
 
         close(sockfd);
+
+    } catch (std::runtime_error& e) {
+        std::cerr << e.what() << std::endl;
+        return -1;
     }
 
 	return 0;
