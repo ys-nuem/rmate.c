@@ -1,7 +1,7 @@
 PROGRAM = rmate
 
-SRCS = $(wildcard *.c)
-OBJS = $(SRCS:.c=.o)
+SRCS = $(wildcard *.cpp)
+OBJS = $(SRCS:.cpp=.o)
 
 INCLUDES = 
 CPPFLAGS += -Wall -Wextra -Wno-missing-field-initializers $(INCLUDES)
@@ -10,7 +10,7 @@ CPPFLAGS += -Wall -Wextra -Wno-missing-field-initializers $(INCLUDES)
 
 $(PROGRAM): $(OBJS)
 
-$(PROGRAM).c: version.h
+$(PROGRAM).o: version.h
 
 version.h:
 	sh version.sh $(MSG_DEF) > $@

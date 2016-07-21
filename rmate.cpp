@@ -1,3 +1,4 @@
+extern "C" {
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <time.h>
+}
 
 #include "version.h"
 
@@ -40,10 +42,12 @@ enum CMD_TYPE {
 };
 
 struct cmd {
-    enum CMD_STATE state;
-    enum CMD_TYPE type;
-    char* filename;
-    size_t file_len;
+    CMD_STATE state = CMD_HEADER;
+    CMD_TYPE type = UNKNOWN;
+    char* filename = NULL;
+    size_t file_len = 0;
+public:
+    cmd() = default;
 };
 
 int get_server_info(char const* host, char const* port, struct addrinfo** servinfo) {
@@ -99,7 +103,7 @@ int send_open(int sockfd, const char* filename, int fd) {
         return -1;
     }
 
-    char* fdata = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);    
+    char* fdata = static_cast<char*>(mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0));
     if (fdata == MAP_FAILED) {
         perror("mmap");
         return -1;
@@ -132,7 +136,7 @@ int receive_save(int sockfd, char* rem_buf, size_t rem_buf_len, const char* file
         return -1;
     }
     
-    char* fdata = mmap(NULL, filesize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    char* fdata = static_cast<char*>(mmap(NULL, filesize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
     if (fdata == MAP_FAILED) {
         perror("mmap");
         return -1;
@@ -158,7 +162,7 @@ int receive_save(int sockfd, char* rem_buf, size_t rem_buf_len, const char* file
 }
 
 ssize_t readline(char* buf, size_t len) {
-    char* cmd_str = memchr(buf, '\n', len);
+    char* cmd_str = static_cast<char*>(memchr(buf, '\n', len));
     if (!cmd_str)
         return -1;
     
@@ -340,7 +344,7 @@ int main(int argc, char *argv[])
             close(fd);
         }
 
-        struct cmd cmd_state = {0};
+        cmd cmd_state;
         while (1) {
             char buf[MAXDATASIZE];
 
