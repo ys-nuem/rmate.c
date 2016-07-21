@@ -32,6 +32,8 @@ extern "C" {
 #define MAXDATASIZE 1024
 
 
+namespace rmate {
+
 int get_server_info(char const* host, char const* port, struct addrinfo** servinfo) {
     struct addrinfo hints;
     memset(&hints, 0, sizeof hints);
@@ -75,8 +77,22 @@ ssize_t readline(char* buf, size_t len) {
     return line_len + 1;
 }
 
-int connect_mate(const char* host, const char* port)
-{
+class RmateClient {
+    int sockfd = -1;
+
+public:
+    RmateClient(int fd):sockfd(fd) {}
+
+    ~RmateClient() {
+        close(sockfd);
+    }
+
+    auto read_command() -> std::vector<char>;
+    void send_content(char* filename);
+    int receive_save(char* rem_buf, size_t rem_buf_len, const char* filename, size_t filesize);
+};
+
+RmateClient connect(const char* host, const char* port, char* filename) {
     // get address information of rmate server.
     struct addrinfo* servinfo;
     int ret = get_server_info(host, port, &servinfo);
@@ -84,15 +100,21 @@ int connect_mate(const char* host, const char* port)
         throw std::runtime_error(std::string("getaddrinfo: %s\n") + gai_strerror(ret));
     }
 
-	int sockfd = make_tcp_connection(servinfo);
+    int sockfd = make_tcp_connection(servinfo);
     if (sockfd < 0) {
         throw std::runtime_error("failed to make connection");
     }
 
-	freeaddrinfo(servinfo); // all done with this structure    
+    freeaddrinfo(servinfo); // all done with this structure    
 
-    return sockfd;
+    RmateClient client { sockfd };
+        
+    // send all contents of file to server.
+    client.send_content(filename);
+
+    return client;
 }
+
 
 int send_open(int sockfd, const char* filename, int fd) {
     struct stat st;    
@@ -122,7 +144,7 @@ int send_open(int sockfd, const char* filename, int fd) {
     return 0;
 }
 
-int receive_save(int sockfd, char* rem_buf, size_t rem_buf_len, const char* filename, size_t filesize) {
+int RmateClient::receive_save(char* rem_buf, size_t rem_buf_len, const char* filename, size_t filesize) {
     int fd = open(filename, O_RDWR);
     if (fd == -1) {
         perror("open");
@@ -159,7 +181,7 @@ int receive_save(int sockfd, char* rem_buf, size_t rem_buf_len, const char* file
     return 0;
 }
 
-std::vector<char> read_command(int sockfd) {
+std::vector<char> RmateClient::read_command() {
     std::vector<char> buf(MAXDATASIZE);
     int numbytes = read(sockfd, buf.data(), MAXDATASIZE - 1);
     if (numbytes == -1) {
@@ -173,7 +195,7 @@ std::vector<char> read_command(int sockfd) {
     return buf;
 }
 
-void send_content(int sockfd, char* filename) {
+void RmateClient::send_content(char* filename) {
     int fd = open(filename, O_RDONLY);
     if (fd == -1) {
         throw std::runtime_error("syscall: open");
@@ -204,11 +226,12 @@ class RmateState {
     size_t file_len = 0;
 
 public:
-    ssize_t handle_cmds(int sockfd, char* buf, size_t len) {
+    ssize_t handle_command(RmateClient& cli, std::vector<char> const& command) {
         size_t total_read_len = 0;
-        
-        while (total_read_len < len) {
-            ssize_t read_len = handle_line(sockfd, buf, len);
+
+        char* buf = const_cast<char*>(command.data());
+        while (total_read_len < command.size()) {
+            ssize_t read_len = handle_line(cli, buf, command.size());
             if (read_len == -1)
                 return -1;
             
@@ -228,7 +251,7 @@ private:
             this->file_len = strtoul(value, NULL, 10);
     }
 
-    ssize_t handle_line(int sockfd, char* buf, size_t len) {
+    ssize_t handle_line(RmateClient& cli, char* buf, size_t len) {
         ssize_t read_len = -1;
         size_t token_len;
         char *name, *value;
@@ -273,7 +296,7 @@ private:
         
             handle_var(name, value);
             if (!strcmp(name, "data"))
-                receive_save(sockfd, buf + read_len, len - read_len, this->filename, this->file_len);
+                cli.receive_save(buf + read_len, len - read_len, this->filename, this->file_len);
             break;
             
             err:
@@ -286,6 +309,17 @@ private:
         return read_len;
     }
 };
+
+bool handle_command(RmateClient& client, RmateState& state) {
+    auto command = client.read_command();
+    if (command.empty())
+        return false;
+
+    state.handle_command(client, command);
+    return true;
+}
+
+} // namespace rmate;
 
 void version() {
   char cc[256];
@@ -359,21 +393,10 @@ int main(int argc, char *argv[])
 
     try {
         // create a connection to the server.
-        int sockfd = connect_mate(host, port);
-    
-        // send all contents of file to server.
-        send_content(sockfd, filename);
+        auto client = rmate::connect(host, port, filename);
+        rmate::RmateState state;
 
-        RmateState state;
-        while (1) {
-            auto buf = read_command(sockfd);
-            if (buf.empty())
-                break;
-
-            state.handle_cmds(sockfd, buf.data(), buf.size());
-        }
-
-        close(sockfd);
+        while (rmate::handle_command(client, state));
 
     } catch (std::runtime_error& e) {
         std::cerr << e.what() << std::endl;
