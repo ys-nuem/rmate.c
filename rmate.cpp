@@ -59,6 +59,19 @@ int make_tcp_connection(struct addrinfo* p) {
     return -1;
 }
 
+ssize_t readline(char* buf, size_t len) {
+    char* cmd_str = static_cast<char*>(memchr(buf, '\n', len));
+    if (!cmd_str)
+        return -1;
+    
+    ssize_t line_len = cmd_str - buf;
+    if (line_len > 0 && cmd_str[-1] == '\r')
+        cmd_str[-1] = '\0';
+    cmd_str[0] = '\0';
+    
+    return line_len + 1;
+}
+
 int connect_mate(const char* host, const char* port)
 {
     // get address information of rmate server.
@@ -140,20 +153,21 @@ int receive_save(int sockfd, char* rem_buf, size_t rem_buf_len, const char* file
     return 0;
 }
 
-ssize_t readline(char* buf, size_t len) {
-    char* cmd_str = static_cast<char*>(memchr(buf, '\n', len));
-    if (!cmd_str)
+int read_command(int sockfd, char* buf, size_t len) {
+    int numbytes = read(sockfd, buf, len - 1);
+    if (numbytes == -1) {
+        perror("read");
         return -1;
-    
-    ssize_t line_len = cmd_str - buf;
-    if (line_len > 0 && cmd_str[-1] == '\r')
-        cmd_str[-1] = '\0';
-    cmd_str[0] = '\0';
-    
-    return line_len + 1;
+    }
+
+    if (numbytes == 0)
+        return 0;
+
+    buf[numbytes] = '\0';
+    return numbytes;
 }
 
-struct cmd {
+class RmateState {
     enum CMD_STATE {
         CMD_HEADER,
         CMD_CMD,
@@ -173,8 +187,6 @@ struct cmd {
     size_t file_len = 0;
 
 public:
-    cmd() = default;
-
     ssize_t handle_cmds(int sockfd, char* buf, size_t len) {
         size_t total_read_len = 0;
         
@@ -214,7 +226,7 @@ private:
         case CMD_CMD:
             if ((read_len = readline(buf, len)) > 0 && *buf != '\0') {
                 free(this->filename);
-                memset(this, 0, sizeof(cmd));
+                memset(this, 0, sizeof(RmateState));
 
                 if (!strncmp(buf, "close", read_len))
                     this->type = CLOSE;
@@ -347,22 +359,15 @@ int main(int argc, char *argv[])
             close(fd);
         }
 
-        cmd cmd_state;
+        RmateState state;
         while (1) {
             char buf[MAXDATASIZE];
-
-            int numbytes = read(sockfd, buf, MAXDATASIZE - 1);
-            if (numbytes == -1) {
-                perror("read");
-                return -1;
+            int numbytes = read_command(sockfd, buf, MAXDATASIZE);
+            if (numbytes < 0) {
+                return numbytes;
             }
-        
-            if (numbytes == 0)
-                break;
 
-            buf[numbytes] = '\0';
-            
-            cmd_state.handle_cmds(sockfd, buf, numbytes);
+            state.handle_cmds(sockfd, buf, numbytes);
         }
 
         close(sockfd);
