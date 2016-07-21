@@ -33,63 +33,79 @@ enum CMD_STATE {
     CMD_END
 };
 
+enum CMD_TYPE {
+    UNKNOWN,
+    CLOSE,
+    SAVE
+};
+
 struct cmd {
     enum CMD_STATE state;
-    enum {UNKNOWN, CLOSE, SAVE} cmd_type;
+    enum CMD_TYPE type;
     char* filename;
     size_t file_len;
 };
 
-int connect_mate(const char* host, const char* port) {
-	int sockfd = -1;  
-	struct addrinfo hints, *servinfo, *p;
-	int rv;
+int get_server_info(char const* host, char const* port, struct addrinfo** servinfo) {
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
 
-	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
+    return getaddrinfo(host, port, &hints, servinfo);
+}
 
-	if ((rv = getaddrinfo(host, port, &hints, &servinfo)) != 0) {
-		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
-		return -1;
-	}
-
+int make_tcp_connection(struct addrinfo* p) {
 	// loop through all the results and connect to the first we can
-	for(p = servinfo; p != NULL; p = p->ai_next) {
-		if ((sockfd = socket(p->ai_family, p->ai_socktype,
-				p->ai_protocol)) == -1) {
-			continue;
+	while (p != NULL) {
+        int sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+		if (sockfd == -1) {
+            p = p->ai_next;
+    		continue;
 		}
 
 		if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
 			close(sockfd);
-            sockfd = -1;
+            p = p->ai_next;
 			continue;
 		}
 
-		break;
+		return sockfd;
 	}
 
-	freeaddrinfo(servinfo); // all done with this structure
-    
+    return -1;
+}
+
+int connect_mate(const char* host, const char* port)
+{
+    // get address information of rmate server.
+    struct addrinfo* servinfo;
+    int ret = get_server_info(host, port, &servinfo);
+    if (ret != 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(ret));
+        return -1;
+    }
+
+	int sockfd = make_tcp_connection(servinfo);
+
+	freeaddrinfo(servinfo); // all done with this structure    
     return sockfd;
 }
 
 int send_open(int sockfd, const char* filename, int fd) {
-    char *fdata;
-    char resolved[PATH_MAX];
-    struct stat st;
-    
-    if(fstat(fd, &st) == -1) {
+    struct stat st;    
+    if (fstat(fd, &st) == -1) {
         perror("stat");
         return -1;
     }
-    
-    if((fdata = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED) {
+
+    char* fdata = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);    
+    if (fdata == MAP_FAILED) {
         perror("mmap");
         return -1;
     }
-    
+
+    char resolved[PATH_MAX];    
     dprintf(sockfd, "open\n");
     dprintf(sockfd, "display-name: %s\n", filename);
     dprintf(sockfd, "real-path: %s\n", realpath(filename, resolved));
@@ -105,34 +121,34 @@ int send_open(int sockfd, const char* filename, int fd) {
 }
 
 int receive_save(int sockfd, char* rem_buf, size_t rem_buf_len, const char* filename, size_t filesize) {
-    char *fdata;
-    int fd, numbytes;
-
-    if((fd = open(filename, O_RDWR)) == -1) {
+    int fd = open(filename, O_RDWR);
+    if (fd == -1) {
         perror("open");
         return -1;
     }
     
-    if(ftruncate(fd, filesize) == -1) {
+    if (ftruncate(fd, filesize) == -1) {
         perror("ftruncate");
         return -1;
     }
     
-    if((fdata = mmap(NULL, filesize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+    char* fdata = mmap(NULL, filesize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (fdata == MAP_FAILED) {
         perror("mmap");
         return -1;
     }
     
-    if(rem_buf_len > filesize)
+    if (rem_buf_len > filesize)
         rem_buf_len = filesize;
     
     memcpy(fdata, rem_buf, rem_buf_len);
-    if((numbytes = read(sockfd, fdata + rem_buf_len, filesize - rem_buf_len)) == -1) {
+    int numbytes = read(sockfd, fdata + rem_buf_len, filesize - rem_buf_len);
+    if (numbytes == -1) {
         perror("read");
         return -1;
     }
     
-    if(munmap(fdata, filesize) == -1) {
+    if (munmap(fdata, filesize) == -1) {
         perror("munmap");
         return -1;
     }
@@ -142,30 +158,27 @@ int receive_save(int sockfd, char* rem_buf, size_t rem_buf_len, const char* file
 }
 
 ssize_t readline(char* buf, size_t len) {
-    char *cmd_str;
-    ssize_t line_len;
-    
-    cmd_str = memchr(buf, '\n', len);
-    if(!cmd_str)
+    char* cmd_str = memchr(buf, '\n', len);
+    if (!cmd_str)
         return -1;
     
-    line_len = cmd_str - buf;
-    if(line_len > 0 && cmd_str[-1] == '\r')
+    ssize_t line_len = cmd_str - buf;
+    if (line_len > 0 && cmd_str[-1] == '\r')
         cmd_str[-1] = '\0';
     cmd_str[0] = '\0';
     
     return line_len + 1;
 }
 
-void handle_var(const char* name, const char* value, struct cmd *cmd_state) {
-    if(!strcmp(name, "token"))
+void handle_var(const char* name, const char* value, struct cmd* cmd_state) {
+    if (!strcmp(name, "token"))
         cmd_state->filename = strdup(value);
     
-    if(!strcmp(name, "data"))
+    if (!strcmp(name, "data"))
         cmd_state->file_len = strtoul(value, NULL, 10);
 }
 
-ssize_t handle_line(int sockfd, char* buf, size_t len, struct cmd *cmd_state) {
+ssize_t handle_line(int sockfd, char* buf, size_t len, struct cmd* cmd_state) {
     ssize_t read_len = -1;
     size_t token_len;
     char *name, *value;
@@ -183,10 +196,10 @@ ssize_t handle_line(int sockfd, char* buf, size_t len, struct cmd *cmd_state) {
             memset(cmd_state, 0, sizeof(*cmd_state));
             
             if(!strncmp(buf, "close", read_len))
-                cmd_state->cmd_type = CLOSE;
+                cmd_state->type = CLOSE;
             
             if(!strncmp(buf, "save", read_len))
-                cmd_state->cmd_type = SAVE;
+                cmd_state->type = SAVE;
             
             cmd_state->state = CMD_VAR;
         }
@@ -226,9 +239,9 @@ ssize_t handle_line(int sockfd, char* buf, size_t len, struct cmd *cmd_state) {
 ssize_t handle_cmds(int sockfd, char* buf, size_t len, struct cmd *cmd_state) {
     size_t total_read_len = 0;
     
-    while(total_read_len < len) {
-        ssize_t read_len;
-        if((read_len = handle_line(sockfd, buf, len, cmd_state)) == -1)
+    while (total_read_len < len) {
+        ssize_t read_len = handle_line(sockfd, buf, len, cmd_state);
+        if (read_len == -1)
             return -1;
         
         buf += read_len;
@@ -261,21 +274,19 @@ void usage(void) {
 
 int main(int argc, char *argv[])
 {
-    int ch;
-	int sockfd, fd, numbytes;
-    char *filename;
-    char* host = getenv(HOST_ENV);
-    char* port = getenv(PORT_ENV);
-    int need_wait = 0;
-    struct cmd cmd_state = {0};
-    
-    if(!host)
-        host = DEFAULT_HOST;
-    if(!port)
-        port = DEFAULT_PORT;
-    
     signal(SIGCHLD, SIG_IGN);
 
+    char* host = getenv(HOST_ENV);
+    if (!host)
+        host = DEFAULT_HOST;
+
+    char* port = getenv(PORT_ENV);
+    if (!port)
+        port = DEFAULT_PORT;
+
+    int need_wait = 0;
+
+    int ch;
     while ((ch = getopt(argc, argv, "whvH:p:")) != -1) {
       switch(ch) {
         case 'w':
@@ -299,42 +310,56 @@ int main(int argc, char *argv[])
     argc -= optind; 
     argv += optind;
     
-    if(argc < 1)
+    if (argc < 1)
         usage();
     
-    if(!need_wait && fork() > 0)
-        exit(0);
-    
-    if((sockfd = connect_mate(host, port)) == -1) {
-        fprintf(stderr, "Could not connect\n");
-        return -1;
-    }
-    
-    filename = argv[0];
-    if((fd = open(filename, O_RDONLY)) == -1) {
-        perror("open");
-        return -1;
-    }
-    
-    send_open(sockfd, filename, fd);
-    close(fd);
+    char* filename = argv[0];
 
-    while(1) {
-	    char buf[MAXDATASIZE];
-        
-        if((numbytes = read(sockfd, buf, MAXDATASIZE-1)) == -1) {
-            perror("read");
+    // run as background process.
+    if (!need_wait) {
+        if (fork() > 0)
+            exit(0);
+    }
+
+    // create a connection to the server.
+    {
+        int sockfd = connect_mate(host, port);
+        if (sockfd == -1) {
+            fprintf(stderr, "Could not connect\n");
             return -1;
         }
     
-        if(numbytes == 0)
-            break;
-        buf[numbytes] = '\0';
-        
-        handle_cmds(sockfd, buf, numbytes, &cmd_state);
-    }
+        // send all contents of file to server.
+        {
+            int fd = open(filename, O_RDONLY);    
+            if (fd == -1) {
+                perror("open");
+                return -1;
+            }    
+            send_open(sockfd, filename, fd);
+            close(fd);
+        }
 
-	close(sockfd);
+        struct cmd cmd_state = {0};
+        while (1) {
+            char buf[MAXDATASIZE];
+
+            int numbytes = read(sockfd, buf, MAXDATASIZE - 1);
+            if (numbytes == -1) {
+                perror("read");
+                return -1;
+            }
+        
+            if (numbytes == 0)
+                break;
+
+            buf[numbytes] = '\0';
+            
+            handle_cmds(sockfd, buf, numbytes, &cmd_state);
+        }
+
+        close(sockfd);
+    }
 
 	return 0;
 }
